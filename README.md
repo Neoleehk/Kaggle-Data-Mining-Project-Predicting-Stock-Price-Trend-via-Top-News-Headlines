@@ -396,7 +396,7 @@ Comparison table (best variant selected per trial by CV rule):
 
 | keyword_weight | tfidf_weight | Best variant | CV MCC | Holdout MCC | Holdout Accuracy | Holdout ROC AUC |
 |---:|---:|---|---:|---:|---:|---:|
-| 0.2 | 0.8 | filtered_top3 | 0.0780 | 0.0500 | 0.5226 | 0.5494 |
+| **0.2** | **0.8** | **filtered_top3** | **0.0780** | **0.0500** | **0.5226** | **0.5494** |
 | 0.3 | 0.7 | filtered_top3 | 0.0552 | 0.0686 | 0.5327 | 0.5173 |
 | 0.4 | 0.6 | filtered_top5 | 0.1058 | 0.0436 | 0.5226 | 0.5242 |
 | 0.5 | 0.5 | top5_concat | 0.0433 | -0.0324 | 0.4899 | 0.4917 |
