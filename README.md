@@ -418,4 +418,4 @@ Conclusion:
 - **Best holdout MCC observed in this sweep:** `keyword_weight=0.3`, `tfidf_weight=0.7`.
 - **Best holdout ROC AUC observed in this sweep:** `keyword_weight=0.2`, `tfidf_weight=0.8` (ROC AUC=0.5494).
 
-Given the fact that the current stock market is semi-strong, achieving an out-of-sample ROC AUC is a favorable result. The next step is to further improve model performance by enhancing filtering mechanism and feature engineering. 
+Given the fact that the current stock market is semi-strong, achieving an out-of-sample ROC AUC of 0.5494 is a favorable result. The next step is to further improve model performance by enhancing filtering mechanism and feature engineering. 
