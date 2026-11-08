@@ -78,3 +78,343 @@ python scripts/run_embedding_experiments.py --target-mode next_day --cache-dir o
 Notes:
 - `two_stage` mode reduces CPU time by scoring all headlines with SBERT first, then computing FinBERT embeddings only for shortlisted headlines.
 - `--finbert-top-n` controls shortlist size. Smaller is faster.
+
+
+# Idea Log (2026-11-06 15:27:06 +08:00)
+
+## Project Goal
+Build a language-based alpha classifier to predict DJIA trend (`Label`: 1=up, 0=down) from daily news headlines.
+
+## Confirmed Constraints
+- Use provided dataset only:
+  - `Combined_News_DJIA.csv` (Date, Label, Top1..Top25)
+  - `Combined_News_DJIA_clean.csv` (Date, Label, merged daily text)
+- No extra market features/data allowed.
+- Primary task: same-day close direction.
+- Keep robustness check for leakage concerns (news timing uncertainty).
+
+---
+
+## Exact Experiment Blueprint
+
+## 1) Dataset & Target Setup
+- Total rows: **1989** (2008-08-08 to 2016-07-01).
+- Class balance: up=1065, down=924.
+- Primary target: `y_t = Label_t` (same-day setting).
+- Robustness target: `y_t = Label_{t+1}` (next-day setting), dropping last row.
+
+## 2) Text Construction
+- From `Combined_News_DJIA.csv`, parse daily headlines:
+  - `H_t = {Top1..Top25}` excluding null/empty.
+- Use `Combined_News_DJIA_clean.csv` text as baseline daily document `D_t`.
+- Cleaning steps (applied consistently to each headline):
+  1. remove leading byte-string artifacts (`b'...'`, `b"..."`);
+  2. HTML unescape (`&amp;` -> `&`);
+  3. normalize whitespace;
+  4. keep punctuation/casing (important for finance language cues).
+
+## 3) Time Split Protocol (Fixed, No Shuffle)
+Final holdout test = last 20% by date.
+
+- **Train/validation pool:** rows 1..1591 (2008-08-08 to 2014-12-02)
+- **Test holdout:** rows 1592..1989 (2014-12-03 to 2016-07-01)
+
+Expanding-window CV on rows 1..1591:
+
+1. **Fold 1**
+   - Train: rows 1..835 (to 2011-11-29)
+   - Val: rows 836..1087 (2011-11-30 to 2012-11-30)
+2. **Fold 2**
+   - Train: rows 1..1087 (to 2012-11-30)
+   - Val: rows 1088..1339 (2012-12-03 to 2013-12-02)
+3. **Fold 3**
+   - Train: rows 1..1339 (to 2013-12-02)
+   - Val: rows 1340..1591 (2013-12-03 to 2014-12-02)
+
+Rule: all thresholds/scalers/relevance models fit on each fold's training split only.
+
+## 4) Embeddings & Relevance Scoring
+Use both models:
+- **FinBERT** embedding (`e_f`)
+- **Sentence-BERT** embedding (`e_s`)
+
+Define stock-relevance anchors (short phrases):
+- "stock market movement"
+- "equity index returns"
+- "macroeconomic policy impact"
+- "corporate earnings guidance"
+- "market risk sentiment"
+
+For each headline `h`:
+- `s_f(h) = max cosine(e_f(h), e_f(anchor_i))`
+- `s_s(h) = max cosine(e_s(h), e_s(anchor_i))`
+- Hybrid relevance:
+  - `s(h) = w * s_f(h) + (1 - w) * s_s(h)`
+  - `w` tuned in `{0.3, 0.5, 0.7}` using CV.
+
+## 5) Weak-Supervised Relevance Classifier (Optional but Planned)
+Within each fold:
+1. Create weak labels from training headlines:
+   - relevant=1 if `s(h)` in top 30% of training headlines, else 0.
+2. Train relevance classifier (logistic regression on concatenated `[e_f; e_s]`).
+3. Replace `s(h)` with classifier probability `p_rel(h)` for headline ranking.
+
+If this underperforms, keep direct hybrid score `s(h)`.
+
+## 6) Daily Feature Variants (Ablation Core)
+For each day `t`, compare:
+
+- **F0**: Daily merged text embedding from `D_t` (baseline)
+- **F1**: Top-1 relevant headline embedding
+- **F2**: Top-3 relevance-weighted pooled embedding
+- **F3**: Top-5 relevance-weighted pooled embedding
+- **F4**: All-headline relevance-weighted pooled embedding
+- **F5**: EWMA memory on F2:
+  - `z_t = alpha * x_t + (1-alpha) * z_{t-1}`
+  - `alpha` in `{0.2, 0.4, 0.6, 0.8}`
+
+`x_t` can be combined embedding `[e_f; e_s]` or reduced via PCA (fit on training only).
+
+## 7) Direction Classifiers
+Train on each feature variant:
+- Logistic Regression (`C` in {0.1, 1, 10})
+- Linear SVM (`C` in {0.1, 1, 10})
+- XGBoost/GBDT (small grid):
+  - depth `{3, 5}`
+  - learning rate `{0.03, 0.1}`
+  - estimators `{100, 300}`
+
+Optional deep model track:
+- FinBERT sequence classifier on selected text input (Top-k joined).
+- Use only if time permits after classical baseline matrix is complete.
+
+## 8) Metrics & Selection
+Primary:
+- **MCC** (robust for slight imbalance)
+- **F1**
+- **Accuracy**
+
+Secondary:
+- ROC-AUC
+- Balanced Accuracy
+
+Model selection rule:
+1. maximize mean CV MCC;
+2. tie-break with mean CV F1;
+3. then Accuracy.
+
+Final report:
+- Refit best config on rows 1..1591.
+- Evaluate once on holdout rows 1592..1989.
+
+## 9) Mandatory Result Tables
+1. **Main comparison table**: feature variant + model + CV metrics + holdout metrics.
+2. **Ablation table**:
+   - no relevance filtering vs relevance filtering
+   - no EWMA vs EWMA
+   - FinBERT only vs SBERT only vs hybrid
+3. **Leakage robustness table**:
+   - same-day target vs next-day target.
+
+## 10) Minimal Reproducibility Checklist
+- Fix random seeds (e.g., 42).
+- Log package versions.
+- Save split indices/dates.
+- Save best hyperparameters and final predictions.
+- Keep one command/script entrypoint for rerun.
+
+---
+
+## Execution Order
+1. Build loader + cleaner + time splits.
+2. Build FinBERT/SBERT embedding cache.
+3. Implement relevance scoring and ranking.
+4. Implement feature variants F0-F5.
+5. Run CV matrix across classifiers.
+6. Run holdout test with best model.
+7. Run robustness (next-day target).
+8. Export tables/plots for report.
+
+---
+
+## Notes for Write-up
+- Clearly disclose potential same-day timing leakage due to no intraday timestamps.
+- Position same-day as assignment-required main task; next-day as robustness evidence.
+- Highlight whether "relevance filtering" adds measurable signal over plain merged text.
+
+---
+
+## Execution Progress Log (2026-11-06)
+
+Implemented project skeleton:
+- `src/news_alpha/data.py`: loader + cleaner + same-day/next-day target builder.
+- `src/news_alpha/splits.py`: fixed expanding-window CV and holdout split logic.
+- `src/news_alpha/baseline.py`: TF-IDF baseline with Logistic Regression (SVM optional flag).
+- `scripts/prepare_dataset.py`: exports prepared dataset and split metadata.
+- `scripts/run_tfidf_baseline.py`: runs baseline and saves JSON outputs.
+- `requirements.txt`, `README.md` added.
+
+Generated outputs:
+- `outputs/daily_news_prepared.csv`
+- `outputs/split_metadata.json`
+- `outputs/baseline_same_day.json`
+- `outputs/baseline_next_day.json`
+
+Initial baseline findings:
+- Same-day holdout:
+  - Accuracy: 0.4849
+  - F1: 0.5514
+  - MCC: -0.0358
+  - AUC: 0.4725
+- Next-day holdout (robustness):
+  - Accuracy: 0.5038
+  - F1: 0.5727
+  - MCC: 0.0038
+  - AUC: 0.5163
+
+Interpretation:
+- Text-only TF-IDF baseline is near random; this is expected.
+- Next step is to implement embedding-based relevance ranking and top-k/EWMA feature variants.
+
+## Execution Progress Log (2026-11-06, Embedding Phase Started)
+
+Implemented:
+- `src/news_alpha/embeddings.py`
+  - FinBERT + SBERT encoders
+  - unique text collection
+  - embedding cache save/load
+- `src/news_alpha/relevance.py`
+  - hybrid relevance scoring with anchor similarity
+  - weighted pooling utility
+- `src/news_alpha/features.py`
+  - F0, F1, F2, F3, F4, F5(EWMA) feature matrix builders
+- `scripts/build_embedding_cache.py`
+  - cache generation CLI
+- `scripts/run_embedding_experiments.py`
+  - automated variant sweep:
+    - weights `w in {0.3, 0.5, 0.7}`
+    - EWMA alpha `{0.2, 0.4, 0.6, 0.8}`
+    - Logistic Regression `C in {0.1, 1, 10}`
+
+Validation performed:
+- Python compile check passed for all modules/scripts.
+- CLI help works for new scripts.
+- Dependency install completed for `torch`, `transformers`, `sentence-transformers`.
+- Smoke test succeeded:
+  - cache built at `outputs/embedding_cache_smoke`
+  - experiments ran and output `outputs/embedding_same_day_smoke.json`
+
+Next action:
+- Run full cache build (all unique texts), then run full same-day and next-day embedding experiments.
+
+## Execution Progress Log (2026-11-06, CNN Pivot)
+
+Context:
+- Transformer path remained computationally expensive on CPU in this environment.
+- We pivoted to a lighter CPU-friendly architecture: TextCNN.
+
+Implemented:
+- `src/news_alpha/textcnn.py`
+  - tokenization + vocabulary builder
+  - TextCNN model (multi-kernel conv + global max pooling)
+  - training/prediction helpers for CV and holdout inference
+- `scripts/run_textcnn_experiments.py`
+  - runs temporal CV with fixed folds
+  - compares variants:
+    - `daily_text`
+    - `top3_concat`
+    - `top5_concat`
+  - supports same-day and next-day targets
+
+Outputs generated:
+- `outputs/textcnn_same_day.json`
+- `outputs/textcnn_next_day.json`
+
+Observed results (holdout):
+- Same-day best-by-CV variant: `top5_concat`
+  - Accuracy: 0.4899
+  - F1: 0.5964
+  - MCC: -0.0324
+  - AUC: 0.4917
+- Next-day best-by-CV variant: `daily_text`
+  - Accuracy: 0.4987
+  - F1: 0.5775
+  - MCC: -0.0076
+  - AUC: 0.5248
+
+Interpretation:
+- TextCNN is operational and substantially more practical for CPU runs.
+- Signal remains weak on this dataset; metrics are still near random baseline.
+
+## Execution Progress Log (2026-11-06, Lightweight Filter + CNN Rerun)
+
+Added lightweight non-transformer relevance filter:
+- `src/news_alpha/light_filter.py`
+  - finance keyword score
+  - TF-IDF anchor similarity score
+  - combined relevance ranking for headline selection
+
+Integrated into CNN pipeline:
+- `scripts/run_textcnn_experiments.py`
+  - new variants: `filtered_top3`, `filtered_top5`
+  - fold-safe fitting: filter is trained only on each fold's training period
+  - holdout filter is fitted on train+validation only (no test leakage)
+
+New outputs:
+- `outputs/textcnn_same_day_filtered.json`
+- `outputs/textcnn_next_day_filtered.json`
+
+Results summary:
+- Same-day:
+  - best CV variant = `filtered_top5`
+  - holdout MCC = **0.0436** (improved vs prior best -0.0324)
+  - holdout accuracy = **0.5226**
+  - holdout AUC = **0.5242**
+- Next-day:
+  - best CV variant remains `daily_text`
+  - filtered variants did not become top by CV
+  - best holdout accuracy among variants in this run is `top3_concat` at **0.5290**
+
+Takeaway:
+- The lightweight filter improved same-day CNN performance and is far cheaper than transformer embedding pipelines in this environment.
+
+## Execution Progress Log (2026-11-06, Filter Weight Sensitivity Sweep)
+
+Objective:
+- Tune lightweight filter weights (`keyword_weight`, `tfidf_weight`) and evaluate each trial on same-day TextCNN.
+
+Trials run:
+- (0.2, 0.8)
+- (0.3, 0.7)
+- (0.4, 0.6)
+- (0.5, 0.5)
+- (0.6, 0.4)
+- (0.7, 0.3)
+- (0.8, 0.2)
+
+Comparison table (best variant selected per trial by CV rule):
+
+| keyword_weight | tfidf_weight | Best variant | CV MCC | Holdout MCC | Holdout Accuracy | Holdout ROC AUC |
+|---:|---:|---|---:|---:|---:|---:|
+| 0.2 | 0.8 | filtered_top3 | 0.0780 | 0.0500 | 0.5226 | 0.5494 |
+| 0.3 | 0.7 | filtered_top3 | 0.0552 | 0.0686 | 0.5327 | 0.5173 |
+| 0.4 | 0.6 | filtered_top5 | 0.1058 | 0.0436 | 0.5226 | 0.5242 |
+| 0.5 | 0.5 | top5_concat | 0.0433 | -0.0324 | 0.4899 | 0.4917 |
+| 0.6 | 0.4 | top5_concat | 0.0433 | -0.0324 | 0.4899 | 0.4917 |
+| 0.7 | 0.3 | top5_concat | 0.0433 | -0.0324 | 0.4899 | 0.4917 |
+| 0.8 | 0.2 | filtered_top3 | 0.0606 | 0.0268 | 0.5151 | 0.5081 |
+
+Summary (best variant selected per trial by CV rule):
+- k=0.2, t=0.8 -> best variant: `filtered_top3`, CV MCC=0.0780, holdout MCC=0.0500, holdout acc=0.5226, holdout ROC AUC=0.5494
+- k=0.3, t=0.7 -> best variant: `filtered_top3`, CV MCC=0.0552, holdout MCC=0.0686, holdout acc=0.5327, holdout ROC AUC=0.5173
+- k=0.4, t=0.6 -> best variant: `filtered_top5`, CV MCC=0.1058, holdout MCC=0.0436, holdout acc=0.5226, holdout ROC AUC=0.5242
+- k=0.5, t=0.5 -> best variant: `top5_concat`, CV MCC=0.0433, holdout MCC=-0.0324, holdout acc=0.4899, holdout ROC AUC=0.4917
+- k=0.6, t=0.4 -> best variant: `top5_concat`, CV MCC=0.0433, holdout MCC=-0.0324, holdout acc=0.4899, holdout ROC AUC=0.4917
+- k=0.7, t=0.3 -> best variant: `top5_concat`, CV MCC=0.0433, holdout MCC=-0.0324, holdout acc=0.4899, holdout ROC AUC=0.4917
+- k=0.8, t=0.2 -> best variant: `filtered_top3`, CV MCC=0.0606, holdout MCC=0.0268, holdout acc=0.5151, holdout ROC AUC=0.5081
+
+Conclusion:
+- **Best by project model-selection rule (CV MCC): `keyword_weight=0.4`, `tfidf_weight=0.6`**.
+- **Best holdout MCC observed in this sweep:** `keyword_weight=0.3`, `tfidf_weight=0.7`.
+- **Best holdout ROC AUC observed in this sweep:** `keyword_weight=0.2`, `tfidf_weight=0.8` (ROC AUC=0.5494).
+
