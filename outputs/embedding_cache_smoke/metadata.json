@@ -1,0 +1,14 @@
+{
+  "finbert_model": "ProsusAI/finbert",
+  "sbert_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "rows": 12,
+  "finbert_dim": 768,
+  "sbert_dim": 384,
+  "anchors": [
+    "stock market movement",
+    "equity index returns",
+    "macroeconomic policy impact",
+    "corporate earnings guidance",
+    "market risk sentiment"
+  ]
+}
